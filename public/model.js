@@ -5,9 +5,12 @@
   const initialKeys=['fee','setup','equipment','stock','preopen'];
   const fixedKeys=['rent','payroll','owner','utilities','software','accounting','logistics','other'];
   const sum=(arr)=>arr.reduce((a,b)=>a+b,0);
-  function make(p={}) {return {...defaults,...p,id:p.id||crypto.randomUUID(),extra:p.extra||[],checked:p.checked||[]};}
+  Object.assign(defaults,{openingDelay:0,preopeningMonthly:0,preopeningInvestments:[]});
+  function make(p={}) {return {...defaults,...p,id:p.id||crypto.randomUUID(),extra:p.extra||[],checked:p.checked||[],preopeningInvestments:p.preopeningInvestments||[]};}
   function hydrate(p){return make({...p,analysisMode:p.analysisMode||'detailed'});}
   function investment(p){if(p.investmentMode==='total')return p.investmentTotal;const base=sum(initialKeys.map(k=>p[k]));return base*(1+p.contingency/100)+p.working;}
+  function preopeningAt(p,m){return m>=1&&m<=p.openingDelay?p.preopeningMonthly+sum(p.preopeningInvestments.filter(x=>x.month===m).map(x=>x.amount)):0;}
+  function preopeningInvestment(p){return p.openingDelay*p.preopeningMonthly+sum(p.preopeningInvestments.map(x=>x.amount));}
   function revenue(p){return p.revenueMode==='ticket'?p.ticket*p.salesDay*p.days:p.revenue;}
   const clamp=(v,min,max)=>Math.min(max,Math.max(min,v));
   function scenarioParams(settings={},key=settings.scenario||'base'){
@@ -49,38 +52,42 @@
     const scenario=scenarioParams(settings);
     const factor=typeof factorOverride==='number'?factorOverride:factorOverride?.factor??scenario.factor;
     const marginDelta=typeof factorOverride==='object'?factorOverride.marginDelta??scenario.marginDelta:scenario.marginDelta;
-    const total=investment(p),loan=Math.min(p.loan,total),equity=total-loan;
+    const initial=investment(p),preopeningTotal=preopeningInvestment(p),total=initial+preopeningTotal,loan=Math.min(p.loan,initial),initialEquity=initial-loan,equity=total-loan;
     const rate=Math.pow(1+p.interest/100,1/12)-1;
     const term=Math.max(1,p.term);
     const installment=loan===0?0:rate===0?loan/term:loan*rate/(1-Math.pow(1+rate,-term));
     const discount=Math.pow(1+tma/100,1/12)-1;
     const maintenance=p.analysisMode==='margin'?0:p.maintenance;
-    let balance=loan,cumulative=-equity,discounted=-equity,npv=-equity,liquidity=p.working,minLiquidity=p.working,payback=null,discountPayback=null,projectCumulative=-total,projectPayback=null;
+    let balance=loan,cumulative=-initialEquity,discounted=-initialEquity,npv=-initialEquity,liquidity=p.working,minLiquidity=p.working,payback=null,discountPayback=null,projectCumulative=-initial,projectPayback=null,profitCumulative=0,invested=initial;
     const rows=[];
     for(let m=1;m<=horizon;m++){
-      const ramp=p.ramp<=1?1:(p.start/100+(1-p.start/100)*Math.min(1,(m-1)/(p.ramp-1)));
-      const r=revenue(p)*factor*ramp*Math.pow(1+p.growth/100,(Math.max(0,m-p.ramp))/12);
-      const c=costs(p,r,m,marginDelta);
+      const operationMonth=Math.max(0,m-p.openingDelay),preopening=operationMonth===0;
+      const ramp=p.ramp<=1?1:(p.start/100+(1-p.start/100)*Math.min(1,(operationMonth-1)/(p.ramp-1)));
+      const r=preopening?0:revenue(p)*factor*ramp*Math.pow(1+p.growth/100,(Math.max(0,operationMonth-p.ramp))/12);
+      const c=preopening?{cmv:0,tax:0,payment:0,loss:0,condo:0,royalties:0,royaltyReference:0,marketing:0,fixed:0,extras:0,total:0}:costs(p,r,operationMonth,marginDelta);
+      const additionalInvestment=preopeningAt(p,m),monthlyMaintenance=preopening?0:maintenance;
       const interest=balance*rate;
       const debt=m<=term&&balance>0?Math.min(installment,balance+interest):0;
       balance=Math.max(0,balance-(debt-interest));
       const operating=r-c.total;
-      const projectCash=operating-maintenance,cash=projectCash-debt;
+      const operatingProfit=operating-monthlyMaintenance,projectCash=operatingProfit-additionalInvestment,cash=projectCash-debt;
       const pv=cash/Math.pow(1+discount,m);
       const prev=cumulative,prevD=discounted;
-      cumulative+=cash;discounted+=pv;npv+=pv;liquidity+=cash;minLiquidity=Math.min(minLiquidity,liquidity);
+      cumulative+=cash;discounted+=pv;npv+=pv;liquidity+=cash+additionalInvestment;minLiquidity=Math.min(minLiquidity,liquidity);
+      profitCumulative+=operatingProfit;invested+=additionalInvestment;
       if(equity>0&&payback===null&&prev<0&&cumulative>=0&&cash>0)payback=m-1+(-prev)/cash;
       if(equity>0&&discountPayback===null&&prevD<0&&discounted>=0&&pv>0)discountPayback=m-1+(-prevD)/pv;
       const prevProject=projectCumulative;projectCumulative+=projectCash;
       if(total>0&&projectPayback===null&&prevProject<0&&projectCumulative>=0&&projectCash>0)projectPayback=m-1+(-prevProject)/projectCash;
-      rows.push({month:m,revenue:r,...c,operating,maintenance,debt,interest,cash,projectCash,projectCumulative,cumulative,discounted,liquidity,balance});
+      rows.push({month:m,operationMonth,preopening:preopening?1:0,revenue:r,...c,operating,maintenance:monthlyMaintenance,operatingProfit,additionalInvestment,profitCumulative,invested,debt,interest,cash,projectCash,projectCumulative,cumulative,discounted,liquidity,balance});
     }
-    let stable=rows[Math.max(1,p.ramp)-1];
+    const stableMonth=p.openingDelay+Math.max(1,p.ramp);
+    let stable=rows[stableMonth-1];
     if(!stable){
-      const r=revenue(p)*factor,c=costs(p,r,p.ramp,marginDelta),debt=p.ramp<=term?installment:0,operating=r-c.total;
-      stable={month:p.ramp,revenue:r,...c,operating,maintenance,debt,cash:operating-maintenance-debt,projectCash:operating-maintenance};
+      const r=revenue(p)*factor,c=costs(p,r,p.ramp,marginDelta),debt=stableMonth<=term?installment:0,operating=r-c.total;
+      stable={month:stableMonth,operationMonth:p.ramp,revenue:r,...c,operating,maintenance,debt,operatingProfit:operating-maintenance,additionalInvestment:0,cash:operating-maintenance-debt,projectCash:operating-maintenance};
     }
-    return {total,loan,equity,installment,rows,stable,payback,projectPayback,discountPayback,npv,additional:Math.max(0,-minLiquidity),ending:cumulative,projectEnding:projectCumulative,totalProfit:sum(rows.map(r=>r.projectCash)),totalCash:sum(rows.map(r=>r.cash)),firstYearProfit:sum(rows.slice(0,12).map(r=>r.projectCash)),remaining:Math.max(0,-cumulative),roi:equity>0?cumulative/equity*100:null,breakEven:breakEven(p,stable.month,stable.debt,marginDelta),margin:stable.revenue>0?stable.cash/stable.revenue*100:null};
+    return {initial,initialEquity,preopeningTotal,total,loan,equity,installment,rows,stable,payback,projectPayback,discountPayback,npv,additional:Math.max(0,-minLiquidity),ending:cumulative,projectEnding:projectCumulative,totalProfit:profitCumulative,invested,plannedBeyondHorizon:total-invested,totalCash:sum(rows.map(r=>r.cash)),firstYearProfit:sum(rows.slice(0,12).map(r=>r.operatingProfit)),remaining:Math.max(0,-cumulative),roi:equity>0?cumulative/equity*100:null,breakEven:breakEven(p,stable.operationMonth,stable.debt,marginDelta),margin:stable.revenue>0?stable.cash/stable.revenue*100:null};
   }
   function validate(p){
     const errors=[];
@@ -88,6 +95,8 @@
     for(const k of ['contingency','start','cmv','tax','payment','loss','condo','royalty','marketing'])if(p[k]>100)errors.push(k);
     if(p.growth<=-100||p.inflation<=-100)errors.push('growth/inflation');
     if(!Number.isInteger(p.ramp)||p.ramp<1||p.ramp>120)errors.push('ramp');
+    if(!Number.isInteger(p.openingDelay)||p.openingDelay>120)errors.push('openingDelay');
+    if(!Array.isArray(p.preopeningInvestments)||p.preopeningInvestments.length>120||p.preopeningInvestments.some(x=>!x||typeof x.name!=='string'||x.name.length>500||!Number.isInteger(x.month)||x.month<1||x.month>p.openingDelay||!Number.isFinite(x.amount)||x.amount<0))errors.push('preopeningInvestments');
     if(!Number.isInteger(p.term)||p.term<1||p.term>360)errors.push('term');
     if(p.days>31)errors.push('days');
     if(p.growth>200||p.inflation>100||p.interest>1000)errors.push('rates');
@@ -105,6 +114,6 @@
     make({id:'example-a',name:'Mercado Compacto',advertisedMargin:15,example:true,format:'Autônomo · 1 ponto',fee:10000,setup:4000,equipment:12000,stock:7000,preopen:1000,working:10000,contingency:10,revenue:22000,cmv:62,tax:5,royalty:5,payment:1.8,loss:2,condo:3,owner:1500,utilities:350,software:200,accounting:350,logistics:400,maintenance:100,ramp:6,start:50}),
     make({id:'example-b',name:'Mercado Essencial',advertisedMargin:18,example:true,format:'Autônomo · 1 ponto',fee:30000,setup:5000,equipment:17000,stock:10000,preopen:1500,working:15000,contingency:10,revenue:32000,cmv:60,tax:5,royalty:6.5,payment:1.8,loss:2,condo:3,owner:2000,utilities:450,software:250,accounting:350,logistics:600,maintenance:150,ramp:8,start:40}),
     make({id:'example-c',name:'Mercado de Bairro',advertisedMargin:12,example:true,format:'Loja física · 1 ponto',fee:20000,setup:30000,equipment:45000,stock:30000,preopen:5000,working:30000,contingency:10,revenue:95000,cmv:62,tax:6,royalty:3,payment:1.5,loss:2,rent:4500,payroll:6500,owner:3000,utilities:1600,accounting:500,software:350,logistics:500,maintenance:350,ramp:9,start:50})];}
-  root.FranquiaModel={defaults,scenarios,make,hydrate,investment,revenue,costs,project,validate,seeds,scenarioParams};
+  root.FranquiaModel={defaults,scenarios,make,hydrate,investment,preopeningAt,preopeningInvestment,revenue,costs,project,validate,seeds,scenarioParams};
   if(typeof module!=='undefined')module.exports=root.FranquiaModel;
 })(typeof globalThis!=='undefined'?globalThis:this);

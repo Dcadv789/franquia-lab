@@ -12,6 +12,10 @@ Para preparar um pacote separado do front-end, execute `node scripts/build-pages
 
 Comparação e projeção de franquias, com cópia local e estudos criptografados na nuvem.
 
+Cada proposta pode informar `openingDelay` (0–120 meses sem faturamento após o pagamento no mês 0), `preopeningMonthly` (desembolso adicional repetido na espera) e `preopeningInvestments` (lista de `{name, month, amount}` de aportes pontuais nos meses 1 até a abertura). Valores antigos recebem zero/uma lista vazia. A primeira receita ocorre em `openingDelay + 1`; rampa e crescimento usam meses de operação. Custos operacionais começam com as vendas; cobranças anteriores entram explicitamente nos adicionais. Não repita valores já incluídos no orçamento inicial.
+
+`investment(p)` mantém apenas o orçamento do mês 0; `project().total` soma também os adicionais planejados. O fluxo desconta os adicionais nas datas de pagamento, sem tratá-los como prejuízo operacional. `totalProfit` soma apenas lucro operacional; o saldo deduz o investimento inicial e os adicionais desembolsados dentro do horizonte. VPL e payback incluem a espera. O financiamento cobre até o investimento inicial, com parcelas desde o mês 1; os adicionais são novos aportes próprios e não consomem automaticamente o giro existente. A necessidade extra de giro considera déficits operacionais e parcelas além desses aportes previstos.
+
 O modelo e o editor ficam em `public/model.js` e `public/app.js`. `cloud-crypto.js` usa códigos aleatórios de 256 bits e AES-GCM; `cloud-store.js` controla gravação automática, recuperação, alterações offline e conflitos; `cloud-ui.js` oferece o painel Nuvem. A API em `app/api/study/route.ts` usa `lib/study-api.mjs` e o banco D1 definido em `db/schema.ts`.
 
 O servidor recebe apenas conteúdo criptografado. O código fica no aparelho e não entra em URLs. A chave de acesso enviada à API é derivada separadamente da chave de criptografia; o banco armazena somente o hash da chave de acesso. Não há listagem pública. Quem tem o código pode ler e editar o estudo.
