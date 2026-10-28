@@ -5,10 +5,21 @@
   const initialKeys=['fee','setup','equipment','stock','preopen'];
   const fixedKeys=['rent','payroll','owner','utilities','software','accounting','logistics','other'];
   const sum=(arr)=>arr.reduce((a,b)=>a+b,0);
-  Object.assign(defaults,{openingDelay:0,preopeningMonthly:0,preopeningInvestments:[]});
-  function make(p={}) {return {...defaults,...p,id:p.id||crypto.randomUUID(),extra:p.extra||[],checked:p.checked||[],preopeningInvestments:p.preopeningInvestments||[]};}
+  Object.assign(defaults,{openingDelay:0,preopeningMonthly:0,preopeningInvestments:[],businessType:'franchise',purchases:[]});
+  const purchaseCategories={fee:'Taxa / direitos',setup:'Obra / montagem',equipment:'Equipamentos',stock:'Estoque',preopen:'Licenças / pré-abertura',working:'Reserva de giro',other:'Outros'};
+  function make(p={}) {return {...defaults,...p,id:p.id||crypto.randomUUID(),extra:p.extra||[],checked:p.checked||[],preopeningInvestments:p.preopeningInvestments||[],purchases:p.purchases||[]};}
   function hydrate(p){return make({...p,analysisMode:p.analysisMode||'detailed'});}
-  function investment(p){if(p.investmentMode==='total')return p.investmentTotal;const base=sum(initialKeys.map(k=>p[k]));return base*(1+p.contingency/100)+p.working;}
+  function purchaseTotal(x){return x.quantity*x.unitPrice;}
+  function workingCapital(p){return p.investmentMode==='list'?sum(p.purchases.filter(x=>x.category==='working').map(purchaseTotal)):p.working;}
+  function investment(p){if(p.investmentMode==='total')return p.investmentTotal;const base=p.investmentMode==='list'?sum(p.purchases.filter(x=>x.category!=='working').map(purchaseTotal)):sum(initialKeys.map(k=>p[k]));return base*(1+p.contingency/100)+workingCapital(p);}
+  function itemize(p){
+    if(p.purchases.length)return p.purchases.map(x=>({...x}));
+    if(p.investmentMode==='total')return [
+      ...(p.investmentTotal>p.working?[{name:'Pacote informado (sem o giro)',category:'other',quantity:1,unitPrice:(p.investmentTotal-p.working)/(1+p.contingency/100),notes:'Valor-base convertido do total fechado; contingência mantida separada.'}]:[]),
+      ...(p.working>0?[{name:'Reserva de giro',category:'working',quantity:1,unitPrice:p.working,notes:''}]:[])
+    ];
+    return [...initialKeys,'working'].filter(k=>p[k]>0).map(k=>({name:purchaseCategories[k],category:k,quantity:1,unitPrice:p[k],notes:'Valor trazido do orçamento por categoria. Detalhe as compras sem repetir este total.'}));
+  }
   function preopeningAt(p,m){return m>=1&&m<=p.openingDelay?p.preopeningMonthly+sum(p.preopeningInvestments.filter(x=>x.month===m).map(x=>x.amount)):0;}
   function preopeningInvestment(p){return p.openingDelay*p.preopeningMonthly+sum(p.preopeningInvestments.map(x=>x.amount));}
   function revenue(p){return p.revenueMode==='ticket'?p.ticket*p.salesDay*p.days:p.revenue;}
@@ -18,6 +29,7 @@
     return {factor:v?1+v.revenue/100:s.factor,marginDelta:v?v.margin:s.marginDelta};
   }
   function royaltyAmount(p,r,cmv=r*p.cmv/100){
+    if(p.businessType==='independent')return 0;
     const rp=(p.royaltyBase==='cmv'?cmv:r)*p.royalty/100;
     return p.royaltyMode==='fixed'?p.royaltyFixed:p.royaltyMode==='minimum'?Math.max(rp,p.royaltyFixed):rp;
   }
@@ -58,7 +70,7 @@
     const installment=loan===0?0:rate===0?loan/term:loan*rate/(1-Math.pow(1+rate,-term));
     const discount=Math.pow(1+tma/100,1/12)-1;
     const maintenance=p.analysisMode==='margin'?0:p.maintenance;
-    let balance=loan,cumulative=-initialEquity,discounted=-initialEquity,npv=-initialEquity,liquidity=p.working,minLiquidity=p.working,payback=null,discountPayback=null,projectCumulative=-initial,projectPayback=null,profitCumulative=0,invested=initial;
+    let balance=loan,cumulative=-initialEquity,discounted=-initialEquity,npv=-initialEquity,liquidity=workingCapital(p),minLiquidity=workingCapital(p),payback=null,discountPayback=null,projectCumulative=-initial,projectPayback=null,profitCumulative=0,invested=initial;
     const rows=[];
     for(let m=1;m<=horizon;m++){
       const operationMonth=Math.max(0,m-p.openingDelay),preopening=operationMonth===0;
@@ -103,8 +115,10 @@
     if(!['complete','partial'].includes(p.investmentStatus))errors.push('investmentStatus');
     if(!Number.isInteger(p.contractMonths)||p.contractMonths>600)errors.push('contractMonths');
     if(p.revenueHigh>0&&p.revenueLow>p.revenueHigh)errors.push('revenueRange');
-    if(p.loan>investment(p))errors.push('loan');
-    if(!['margin','detailed'].includes(p.analysisMode)||!['yes','no'].includes(p.royaltiesIncluded)||!['items','total'].includes(p.investmentMode)||p.advertisedMargin>100)errors.push('margin/mode');
+    if(!['franchise','independent'].includes(p.businessType))errors.push('businessType');
+    if(!Array.isArray(p.purchases)||p.purchases.length>200||p.purchases.some(x=>!x||typeof x.name!=='string'||x.name.length>500||typeof x.notes!=='string'||x.notes.length>2000||!Object.hasOwn(purchaseCategories,x.category)||!Number.isFinite(x.quantity)||x.quantity<0||!Number.isFinite(x.unitPrice)||x.unitPrice<0||!Number.isFinite(purchaseTotal(x))))errors.push('purchases');
+    if(!errors.includes('purchases')&&p.loan>investment(p))errors.push('loan');
+    if(!['margin','detailed'].includes(p.analysisMode)||!['yes','no'].includes(p.royaltiesIncluded)||!['items','total','list'].includes(p.investmentMode)||p.advertisedMargin>100)errors.push('margin/mode');
     if(p.investmentMode==='total'&&p.working>p.investmentTotal)errors.push('working');
     if(!['direct','ticket'].includes(p.revenueMode)||!['percent','fixed','minimum'].includes(p.royaltyMode)||!['cmv','revenue'].includes(p.royaltyBase))errors.push('mode');
     if(!Array.isArray(p.extra)||p.extra.length>100||p.extra.some(x=>!['fixed','percent'].includes(x.type)||!Number.isFinite(x.value)||x.value<0))errors.push('extra');
@@ -114,6 +128,6 @@
     make({id:'example-a',name:'Mercado Compacto',advertisedMargin:15,example:true,format:'Autônomo · 1 ponto',fee:10000,setup:4000,equipment:12000,stock:7000,preopen:1000,working:10000,contingency:10,revenue:22000,cmv:62,tax:5,royalty:5,payment:1.8,loss:2,condo:3,owner:1500,utilities:350,software:200,accounting:350,logistics:400,maintenance:100,ramp:6,start:50}),
     make({id:'example-b',name:'Mercado Essencial',advertisedMargin:18,example:true,format:'Autônomo · 1 ponto',fee:30000,setup:5000,equipment:17000,stock:10000,preopen:1500,working:15000,contingency:10,revenue:32000,cmv:60,tax:5,royalty:6.5,payment:1.8,loss:2,condo:3,owner:2000,utilities:450,software:250,accounting:350,logistics:600,maintenance:150,ramp:8,start:40}),
     make({id:'example-c',name:'Mercado de Bairro',advertisedMargin:12,example:true,format:'Loja física · 1 ponto',fee:20000,setup:30000,equipment:45000,stock:30000,preopen:5000,working:30000,contingency:10,revenue:95000,cmv:62,tax:6,royalty:3,payment:1.5,loss:2,rent:4500,payroll:6500,owner:3000,utilities:1600,accounting:500,software:350,logistics:500,maintenance:350,ramp:9,start:50})];}
-  root.FranquiaModel={defaults,scenarios,make,hydrate,investment,preopeningAt,preopeningInvestment,revenue,costs,project,validate,seeds,scenarioParams};
+  root.FranquiaModel={defaults,scenarios,make,hydrate,investment,workingCapital,purchaseCategories,purchaseTotal,itemize,preopeningAt,preopeningInvestment,revenue,costs,project,validate,seeds,scenarioParams};
   if(typeof module!=='undefined')module.exports=root.FranquiaModel;
 })(typeof globalThis!=='undefined'?globalThis:this);
